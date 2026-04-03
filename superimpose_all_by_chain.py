@@ -59,10 +59,59 @@ def get_matched_ca_pairs(ref_ca_dict, mob_chain):
 # 좌표 변환 및 CIF 저장 (gemmi)
 # ──────────────────────────────────────────────
 
+def _ensure_entity_categories(block):
+    """
+    Mol*가 단백질로 인식하기 위한 필수 mmCIF 카테고리가 없으면 추가.
+
+    _entity, _entity_poly, _struct_asym이 없으면 _atom_site에서
+    chain/entity 정보를 추출하여 생성한다.
+    Mol*는 이 카테고리가 없으면 cartoon 표현을 제공하지 않는다.
+    """
+    if block.find_value("_entity.id") not in ("", None):
+        return
+    entity_loop = block.find(["_entity.id"])
+    if entity_loop and len(entity_loop) > 0:
+        return
+
+    site_table = block.find(
+        "_atom_site.",
+        ["label_entity_id", "label_asym_id", "label_comp_id"],
+    )
+    if not site_table:
+        return
+
+    entities = {}
+    residue_names = {}
+    for row in site_table:
+        eid = row[0] if row[0] not in (".", "?", "") else "1"
+        asym = row[1] if row[1] not in (".", "?", "") else "A"
+        comp = row[2]
+        entities.setdefault(eid, set()).add(asym)
+        residue_names.setdefault(eid, set()).add(comp)
+
+    entity_lp = block.init_loop("_entity.", ["id", "type", "pdbx_description"])
+    for eid in sorted(entities):
+        entity_lp.add_row([eid, "polymer", "polymer"])
+
+    poly_lp = block.init_loop(
+        "_entity_poly.", ["entity_id", "type", "pdbx_strand_id"]
+    )
+    for eid, asym_ids in sorted(entities.items()):
+        strand = ",".join(sorted(asym_ids))
+        poly_lp.add_row([eid, "polypeptide(L)", strand])
+
+    asym_lp = block.init_loop("_struct_asym.", ["id", "entity_id"])
+    for eid, asym_ids in sorted(entities.items()):
+        for asym_id in sorted(asym_ids):
+            asym_lp.add_row([asym_id, eid])
+
+
 def apply_transform_to_cif(input_path, output_path, rot, tran):
     """
     원본 CIF 파일의 모든 메타데이터를 유지하면서
     rotation/translation을 좌표(_atom_site.Cartn_x/y/z)에만 적용하여 저장.
+
+    Mol*에서 cartoon 표현이 가능하도록 필수 entity 카테고리도 보충한다.
 
     변환식: new_coord = old_coord @ rot + tran  (BioPython Superimposer 규약)
     """
@@ -76,6 +125,8 @@ def apply_transform_to_cif(input_path, output_path, rot, tran):
         row[0] = f"{new_coord[0]:.3f}"
         row[1] = f"{new_coord[1]:.3f}"
         row[2] = f"{new_coord[2]:.3f}"
+
+    _ensure_entity_categories(block)
 
     doc.write_file(str(output_path))
 
